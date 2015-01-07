@@ -1,0 +1,244 @@
+                        ;Maxbotix LV-EZ0 format:
+						;RXXXCR
+						;XXX is the distance, CR is carriage return (0x0D)
+						;
+                        ;Port definitions
+						;
+						; pBlazeIDE specific
+						;
+						;DIPSW_port         DSIN    $80          ; Dip Switches to request read
+						;DATA_port			DSOUT	$02			 ; Data readout for 7-segment
+						CONSTANT DIPSW_port, 80               	 ; Dip Switches to request read
+						CONSTANT DATA_port, 02					 ; Data readout for 7-segment
+						;						
+                        CONSTANT UART_status_port, 01            ; UART status input
+						;UART_status_port		DSIN	$01			 ; 							
+                        CONSTANT tx_half_full, 01                ;  Transmitter     half full - bit0
+                        CONSTANT tx_full, 02                     ;    FIFO               full - bit1
+                        CONSTANT rx_half_full, 04                ;  Receiver        half full - bit2
+                        CONSTANT rx_full, 08                     ;    FIFO               full - bit3
+                        CONSTANT rx_data_present, 10             ;               data present - bit4
+                        ;
+                        CONSTANT UART_read_port, 02              ;UART Rx data input
+						;UART_read_port			DSIN	$02		 ;
+                        CONSTANT UART_write_port, 01             ;UART Rx data input
+						;UART_write_port		DSOUT	$01	 	 ; 					
+                        ;
+						;Special Register usage
+                        ;
+                        NAMEREG sF, UART_data                    ;used to pass data to and from the UART
+                        ;
+                        NAMEREG sE, store_pointer                ;used to pass location of data in scratch pad memory                       
+                        ;
+                        ;UART character strings will be stored in scratch pad memory ending in carriage return.
+                        ;
+                        CONSTANT string_start, 20
+                        ;
+                        ;Initialise the system
+                        ;
+            cold_start: LOAD s0, 00                              ;clear all values					
+                        ;
+                        ;Start of the main program loop.
+                        ;
+                        ;A prompt is transmitted to the UART transmitter and then
+                        ;a command can be entered and interpreted.
+                        ;
+          prompt_input: INPUT s3, DIPSW_port      				 ; read switches
+						TEST s3, 80
+						JUMP Z, prompt_input				
+						CALL receive_string      				 ; obtain input string
+                        ;
+                        ;Parse the string and perform actions as required
+                        ;
+                        LOAD s1, string_start					 ; Load current address
+                        CALL fetch_char_from_memory					
+                        COMPARE s0, character_uR                 ; start of "Distance" info
+						JUMP NZ, prompt_input
+                        CALL test_for_distance						
+                        ;
+     test_for_distance: OUTPUT s0, DATA_port       				 ; Data port R
+						CALL fetch_char_from_memory
+                        OUTPUT s0, DATA_port      				 ; Data port digit 0			
+                        CALL fetch_char_from_memory
+                        OUTPUT s0, DATA_port      				 ; Data port digit 1			
+                        CALL fetch_char_from_memory
+                        OUTPUT s0, DATA_port      				 ; Data port digit 2			
+                        CALL fetch_char_from_memory
+                        OUTPUT s0, DATA_port      				 ; Data port CR				
+                        JUMP prompt_input     
+						;
+						; Transmit one character to the UART
+						; 
+						; Character supplied in register called 'uart_data'.
+						; 
+						; The routine first tests the transmit FIFO buffer to see if it is full.
+						; 
+						; Registers used s3
+						; 
+		  send_to_UART: INPUT s3, UART_status_port		 ; test Tx_FIFO buffer
+						TEST s3, tx_full
+						JUMP NZ, send_to_UART
+						;LOAD      s0, UART_data
+						OUTPUT s0, UART_write_port
+						RETURN    			
+                        ;
+                        ;Fetch character from memory and increment memory pointer.
+                        ;
+                        ;The memory pointer is provided in register s1.
+                        ;The character obtained is returned in register s0.
+                        ;
+                        ;Registers used s0 and s1.
+                        ;
+fetch_char_from_memory:	FETCH s0, (s1)                           ;read character
+						ADD s1, 01
+                        RETURN					
+                        ;
+                        ;Read one character from the UART
+                        ;
+                        ;Character read will be returned in a register called 'UART_data' and will be
+                        ;echoed to the UART transmitter.
+                        ;
+                        ;The routine first tests the receiver FIFO buffer to see if data is present.
+                        ;If the FIFO is empty, the routine waits until there is a character to read.
+                        ;As this could take any amount of time the wait loop 
+                        ;
+                        ;Registers used s0 and UART_data
+                        ;
+        read_from_UART: INPUT s0, UART_status_port               ;test Rx_FIFO buffer
+                        TEST s0, rx_data_present
+                        JUMP NZ, read_character
+                        JUMP read_from_UART
+        read_character: INPUT UART_data, UART_read_port          ;read from FIFO
+                        RETURN
+						; 
+						; 
+						; Receive ASCII string from UART
+						; 
+						; An ASCII string will be read from the UART and stored in scratch pad memory
+						; commencing at the location specified by a constant named 'string_start'.
+						; The string will will have a maximum length of 5 characters including a
+						; carriage return (0D) denoting the end of the string.
+						; 
+						; A test is made for the receiver FIFO becoming full. A full status is treated as
+						; a potential error situation. The receiver FIFO being purged of all data and an
+						; empty string being stored (carriage return at first location).
+						; 
+						; Registers used s0, s1, s2 and 'UART_data'.
+						; 
+        receive_string: LOAD s1, string_start                    ;locate start of string
+                        LOAD s2, s1                              ;compute 5 character address
+                        ADD s2, 05
+     receive_full_test: INPUT s0, UART_status_port               ;test Rx_FIFO buffer for full
+                        TEST s0, rx_full
+                        JUMP NZ, read_error
+                        CALL read_from_UART                      ;obtain and echo character
+						COMPARE UART_data, character_uR			 ;test for beginning of string
+						JUMP Z, begin_string					 ;begin again
+     begin_string_jump: STORE UART_data, (s1)                    ;write to memory
+                        COMPARE UART_data, character_CR          ;test for end of string
+                        RETURN Z								 
+                        ADD s1, 01                               ;increment memory pointer
+                        COMPARE s1, s2                           ;test for pointer exceeding 5 characters
+                        JUMP NZ, receive_full_test               ;next character
+    string_start_again: JUMP receive_string                      ;begin again
+		  begin_string: LOAD s1, string_start                    ;locate start of string
+                        LOAD s2, s1                              ;compute 5 character address
+                        ADD s2, 05
+						JUMP begin_string_jump
+                        ;Receiver buffer overflow condition
+            read_error: STORE UART_data, string_start            ;empty string in memory (start with CR)
+    clear_UART_Rx_loop: INPUT s0, UART_status_port               ;test Rx_FIFO buffer for data
+                        TEST s0, rx_data_present
+                        RETURN Z                                 ;finish when buffer is empty
+                        INPUT UART_data, UART_read_port          ;read from FIFO and ignore
+                        JUMP clear_UART_Rx_loop
+                        ;
+                        ;Convert character '0' to '9' to numerical value in range 0 to 9
+                        ;
+                        ;The character supplied in register s0. If the character is in the
+                        ;range '0' to '9', it is converted to the equivalent decimal value.
+                        ;Characters not in the range '0' to '9' are signified by the return
+                        ;with the CARRY flag set.
+                        ;
+                        ;Registers used s0.
+                        ;
+       ; 1char_to_value: ADD s0, C6                               ;reject character codes above '9' (39 hex)
+                        ;RETURN C                                 ;carry flag is set
+                        ;SUB s0, F6                               ;reject character codes below '0' (30 hex)
+                        ;RETURN    
+                        ;
+                        ;ASCII table
+                        ;
+                        CONSTANT character_a, 61
+                        CONSTANT character_b, 62
+                        CONSTANT character_c, 63
+                        CONSTANT character_d, 64
+                        CONSTANT character_e, 65
+                        CONSTANT character_f, 66
+                        CONSTANT character_g, 67
+                        CONSTANT character_h, 68
+                        CONSTANT character_i, 69
+                        CONSTANT character_j, 6A
+                        CONSTANT character_k, 6B
+                        CONSTANT character_l, 6C
+                        CONSTANT character_m, 6D
+                        CONSTANT character_n, 6E
+                        CONSTANT character_o, 6F
+                        CONSTANT character_p, 70
+                        CONSTANT character_q, 71
+                        CONSTANT character_r, 72
+                        CONSTANT character_s, 73
+                        CONSTANT character_t, 74
+                        CONSTANT character_u, 75
+                        CONSTANT character_v, 76
+                        CONSTANT character_w, 77
+                        CONSTANT character_x, 78
+                        CONSTANT character_y, 79
+                        CONSTANT character_z, 7A
+                        CONSTANT character_uA, 41
+                        CONSTANT character_uB, 42
+                        CONSTANT character_uC, 43
+                        CONSTANT character_uD, 44
+                        CONSTANT character_uE, 45
+                        CONSTANT character_uF, 46
+                        CONSTANT character_uG, 47
+                        CONSTANT character_uH, 48
+                        CONSTANT character_uI, 49
+                        CONSTANT character_uJ, 4A
+                        CONSTANT character_uK, 4B
+                        CONSTANT character_uL, 4C
+                        CONSTANT character_uM, 4D
+                        CONSTANT character_uN, 4E
+                        CONSTANT character_uO, 4F
+                        CONSTANT character_uP, 50
+                        CONSTANT character_uQ, 51
+                        CONSTANT character_uR, 52
+                        CONSTANT character_uS, 53
+                        CONSTANT character_uT, 54
+                        CONSTANT character_uU, 55
+                        CONSTANT character_uV, 56
+                        CONSTANT character_uW, 57
+                        CONSTANT character_uX, 58
+                        CONSTANT character_uY, 59
+                        CONSTANT character_uZ, 5A
+                        CONSTANT character_0, 30
+                        CONSTANT character_1, 31
+                        CONSTANT character_2, 32
+                        CONSTANT character_3, 33
+                        CONSTANT character_4, 34
+                        CONSTANT character_5, 35
+                        CONSTANT character_6, 36
+                        CONSTANT character_7, 37
+                        CONSTANT character_8, 38
+                        CONSTANT character_9, 39
+                        CONSTANT character_colon, 3A
+                        CONSTANT character_semi_colon, 3B
+                        CONSTANT character_less_than, 3C
+                        CONSTANT character_greater_than, 3E
+                        CONSTANT character_equals, 3D
+                        CONSTANT character_space, 20
+                        CONSTANT character_CR, 0D                ;carriage return
+                        CONSTANT character_question, 3F          ;'?'
+                        CONSTANT character_dollar, 24
+                        CONSTANT character_BS, 08                ;Back Space command character
+                        ;
